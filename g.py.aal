@@ -1,0 +1,847 @@
+#g.py.aal
+#Model-based automated testing for
+#gcalctool 5.28.2 CE using FMBT in X11
+#Matti Piiroinen 2.12.2015
+#
+#Testing is conducted only in the Basic mode of gcalctool.
+#Dimensions of gcalctool in the test environment desktop:
+#Corners:  +13+77  -1063+77  -1063-344  +13-344  -geometry 284x347+11+51
+#
+#TODO:
+#-OCR-validointi vasta ennen =-painikkeen painallusta
+#-Bksp:n tilalogiikan korjaus
+#-fmbtx11.Screen() ilman Xephyriä?
+#-tarkista aina inputin jälkeen OCR:llä että calc on vielä päällä, eikä kaatunut
+#-Onko + oikeasti plusmerkki OCR:lle? on / tai + tai... >:(
+#-Equalsin jälkeen numeron syöttö ei pyyhi tulosta (=väärin)
+#-Equalsin jälkeen Equals palauttaa näytölle expressionin
+#-exponent operation ^ (=2 times *)
+#-inversion operation
+#
+#DONE:
+#-inputtien niputus (plus, miinus, jako, kerto)
+#-Move Bksp et al out of Number tag
+#-expressionin validointi try-except-lohkoon
+#-eval(expression)
+#-Miten assertoidaan laskutoimitusten tuloksien oikeellisuus?
+#  *Yksi tapa on assertoida OCR:n avulla
+#-ohjelman aukeaminen ikkunan yläkulmaan titlebarista dragaamalla
+#-All indentatiom set to spaces instead of tabs (\t)
+#-kieleksi Englanti
+#-Bksp-toiminto ottamalla substringi number-muuttujasta
+#-painikkeidan bitmapit
+#-tilat set():iin
+#-Varmista, että suljettaessa laskin todella sulkeutuu
+#
+#BUGS FOUND
+#-nollalla jakamiset ja nollan jakamiset jne.
+#-Clr doesn't do anything
+#-Key shortcut for Clr isn't recognized
+#-Crashes if '=' after feeding operation(s) and there's no number on the other side
+
+aal "gcalctool" {
+    language "python" {
+        # coding: utf-8
+
+        from time import sleep
+        import os
+        import random
+
+        # names for application states
+        T_CLEARED = 'Cleared'
+        T_OPERATION = 'Operation'
+        T_NUMBER = 'Number'
+        T_RESULT = 'Result'
+        T_OPEN = 'Open'
+        T_CLOSED = 'Closed'
+
+        # names for operations
+        O_BKSP = 'Backspace'
+        O_CE = 'Escape'
+        O_CLR = 'ShiftDelete'
+        O_INVERSE = 'C'
+        O_PLUS = '+'
+        O_MINUS = '-'
+        O_DIV = '/'
+        O_MULTI = '*'
+        O_EQUAL = '='
+
+        waitShort = 0.01
+        waitLong = 0.5
+        hashableRandom = 7444
+        #random.seed(hashableRandom)
+
+        def adapter_exception_handler(name, exc):
+            import traceback
+            file("adapter_exceptions.txt", "a").write(
+                "exception %s from the adapter of %s\n%s\n" %
+                (exc, name, traceback.format_exc()))
+
+        #Feed a random number into adapter
+        def generateInputNumber():
+            return random.randint(0,100)
+
+        # Validate the expression displayed in the calculator
+        def validateExpression(_expression):
+            if _expression == '':
+                _expression = '0'
+            #_expression = '20-4—+—6'
+            if _expression.find('/') > -1:
+                _expression = _expression.replace('/', '+') #alternative: ÷ or +
+            if _expression.find('*') > -1:
+                _expression = _expression.replace('*', 'x') #alternative: ×
+            if _expression.find('-') > -1:
+                _expression = _expression.replace('-', '—')
+            if _expression != '0':
+                #help(d.ocrEngine())
+                d.verifyOcrText(_expression, match=0.6, area=(64,66,250,86))
+                if not d.verifyOcrText(_expression, match=0.6, area=(64,66,250,86)):
+                    raise AssertionError('validateExpression() did not recognize expression ' + _expression)
+            else:
+                if not d.verifyBitmap("zero.png", colorMatch=0.8):
+                    raise AssertionError('validateExpression() did not recognize a zero (0)')
+
+        # Validate that the SUT is still on
+        def validateSUT():
+            if not d.verifyBitmap("winTitCal.png", colorMatch=0.8):
+                state.clear()
+                state.add(T_CLOSED)
+                raise AssertionError('SUT titlebar was not recognized by OIR. SUT may have crashed unexpectedly.')
+
+        # Validate that the SUT is displaying the malformed expression notification
+        def validateMalformed():
+            if not d.verifyBitmap("winStatusMalformed.png", colorMatch=0.8):
+                state.clear()
+                state.add(T_CLOSED)
+                raise AssertionError('Malformed expression error was not recognized by OIR. SUT may have crashed unexpectedly.')
+    }
+
+    # preview-show-vars: state
+    # preview-depth: 7
+
+    variables {
+        state, number, operation, expression, result
+    }
+
+    initial_state {
+        state = set()           #keep track of model state
+        state.add(T_CLOSED)     #start with SUT closed
+        number = 0              #displayed value
+        operation = None        #last operation put in
+        expression = ''         #full expression
+        result = 0              #displayed value
+    }
+
+    adapter_init {
+        import fmbtx11
+
+        # create a device for controlling the SUT
+        global d
+        global gcalctoolcommand
+        global useXephyr
+        global continueOnError
+        useXephyr = True
+        continueOnError = True
+        gcalctoolpath = '/share/ohjcourses/testaus/installations/gcalctool/gcalctool-ce/bin/gcalctool-ce'
+
+        if useXephyr == True:
+            gcalctoolcommand = 'env DISPLAY=:42 ' + gcalctoolpath + ' &'
+            d = fmbtx11.Screen(':42')
+        else:
+            gcalctoolcommand = 'env ' + gcalctoolpath + ' &'
+            d = fmbtx11.Screen()
+        d.setBitmapPath('images')
+        d.setScreenshotDir('screenshots')
+        d.setScreenshotArchiveMethod('remove')
+        d.setScreenshotLimit(0)
+        d.enableVisualLog('g.html')
+        screenshot = d.refreshScreenshot()
+        #results = None
+        #results = d.oirEngine().adjustParameters(screenshot, "OIRReference.png")
+        #if results != None:
+        #    item, params = results[0]
+        #    print "found %s with parameters:" % (item,)
+        #    print "".join(sorted(["  %s = %s" % (k, params[k]) for k in params]))
+        #    print "verify:", d.verifyBitmap("OIRReference.png", **params)
+    }
+
+    adapter_exit {
+        # no cleanup needed for fmbtx11? But:
+        # Clean-up test setup, fetch relevant logs, crash dumps, etc.
+        # "verdict" and "reason" variables contain more detailed
+        # information why test run ended. For instance, verdict
+        # can have value "pass" and reason "coverage 0.95 reached".
+    }
+
+    #Calculator is closed
+    tag "Closed" {
+        guard() { return T_CLOSED in state }
+        adapter() {}
+        input "Open" {
+            guard() { return True }
+            body() {
+                state.clear()
+                state.add(T_OPEN)
+                state.add(T_CLEARED)
+                number = 0
+                operation = subResult = None
+                expression = ''
+            }
+            adapter() {
+                sleep(waitShort)
+                os.system(gcalctoolcommand)
+                sleep(waitLong)
+                d.pressKey("Tab")
+                d.refreshScreenshot()
+                sleep(waitShort)
+
+                #winTitCal.png should be at (82,1) when positioned correctly in Xephyr
+                #assert d.verifyBitmap("winTitCal.png", colorMatch=0.8)
+                dragOffset = 4
+                imgTitlebar = d.screenshot().findItemsByBitmap("winTitCal.png")
+                if len(imgTitlebar) > 0:
+                    d.drag((imgTitlebar[0].bbox()[0] + dragOffset, imgTitlebar[0].bbox()[1] + dragOffset), (82 + dragOffset, 1 + dragOffset))
+                else:
+                    raise AssertionError('SUT titlebar was not recognized by OIR. findItemsByBitmap() returned ' + str(len(imgTitlebar)) + ' results')
+                sleep(waitShort)
+                d.refreshScreenshot()
+            }
+        }
+    } # tag "Closed"
+
+    tag "Open" {
+        guard() { return T_OPEN in state }
+        adapter() {}
+
+        # suljetaan laskin
+        input "Close" {
+            guard() { return True }
+            body() {
+                if len(state):
+                    state.clear()
+                    state.add(T_CLOSED)
+                number = 0
+                operation = subResult = None
+                expression = ''
+            }
+            adapter() {
+                d.tapBitmap("winClo.png", colorMatch=0.8)
+                sleep(waitShort)
+                d.refreshScreenshot()
+            }
+        }
+
+        # nollataan laskin
+        input "keyBksp" {
+            guard() {
+                return not T_CLOSED in state
+            }
+            body() {
+                operation = O_BKSP
+                if expression != '':
+                    expression = expression[:-1]
+                if expression == '':
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_CLEARED)
+                    
+                #Change state to Operation if the expression
+                #ends with an operator
+                if T_CLEARED not in state and expression != '':
+                    if T_RESULT in state:
+                        state.clear()
+                        state.add(T_OPEN)
+                        state.add(T_NUMBER)
+                    else:
+                        if expression[-1:].isdigit() == True:
+                            state.clear()
+                            state.add(T_OPEN)
+                            state.add(T_NUMBER)
+                        else:
+                            state.clear()
+                            state.add(T_OPEN)
+                            state.add(T_OPERATION)
+            }
+            adapter() {
+                d.pressKey('BackSpace')
+                sleep(waitShort)
+                #d.refreshScreenshot()
+            }
+        }
+
+        input "keyCE" {
+            guard() {
+                return not T_CLOSED in state
+            }
+            body() {
+                if len(state):
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_CLEARED)
+                number = 0
+                operation = subResult = None
+                expression = ''
+            }
+            adapter() {
+                if not d.tapBitmap("btnCE.png", colorMatch=0.8):
+                    assert d.tapBitmap("nappi_ac_valittu.png", colorMatch=0.8)
+                sleep(waitShort)
+                #d.refreshScreenshot()
+            }
+        }
+
+        input "keyClr" {
+            guard() {
+                return not T_CLOSED in state
+            }
+            body() {
+                if len(state):
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_CLEARED)
+                number = 0
+                operation = subResult = None
+                expression = ''
+            }
+            adapter() {
+                d.pressKey("Shift_L", modifiers="Delete")
+                sleep(waitShort)
+                #d.refreshScreenshot()
+            }
+        }
+
+        input "keyInverse" {
+            guard() {
+                return False
+            }
+            body() {
+                if len(state):
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                operation = O_MULTI
+                expression = expression + operation
+            }
+            adapter() {
+                d.type('C')
+                sleep(waitShort)
+                d.refreshScreenshot()
+            }
+        }
+
+        #Calculator was just opened
+        tag "Cleared" {
+            guard() { return T_CLEARED in state }
+            adapter() {
+                validateExpression(expression)
+            }
+
+            # syötetään laskimeen jokin number
+            input "InputNumberCleared" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_NUMBER)
+                }
+                adapter() {
+                    number = generateInputNumber()
+                    expression = expression + str(number)
+                    d.type(str(number))
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyAddCleared", "keySubstractCleared", "keyDivideCleared", "keyMultiplyCleared" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "keyAddCleared":
+                        operation = O_PLUS
+                        d.type('+')
+                    if input_name.split()[0] == "keySubstractCleared":
+                        operation = O_MINUS
+                        d.type('-')
+                    if input_name.split()[0] == "keyDivideCleared":
+                        operation = O_DIV
+                        d.type('/')
+                    if input_name.split()[0] == "keyMultiplyCleared":
+                        operation = O_MULTI
+                        d.type('*')
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyEqualsCleared" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_RESULT)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                    d.type('=')
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                }
+            }
+
+            input "clickAddCleared", "clickSubstractCleared", "clickDivideCleared", "clickMultiplyCleared" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "clickAddCleared":
+                        operation = O_PLUS
+                        d.tapBitmap("btnPlu.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickSubstractCleared":
+                        operation = O_MINUS
+                        d.tapBitmap("btnMin.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickDivideCleared":
+                        operation = O_DIV
+                        d.tapBitmap("btnDiv.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickMultiplyCleared":
+                        operation = O_MULTI
+                        d.tapBitmap("btnMul.png", colorMatch=0.8)
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "clickEqualsCleared" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_RESULT)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                    d.tapBitmap("btnEqu.png", colorMatch=0.8)
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                }
+            }
+
+        } #tag "Cleared"
+
+        #An operation number was put in previously
+        #or the calculator was just opened
+        tag "Operation" {
+            guard() { return T_OPERATION in state }
+            adapter() {
+                #validateExpression(expression)
+            }
+
+            # syötetään laskimeen jokin number
+            input "InputNumberOperation" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_NUMBER)
+                }
+                adapter() {
+                    number = generateInputNumber()
+                    expression = expression + str(number)
+                    d.type(str(number))
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyAddOperation", "keySubstractOperation", "keyDivideOperation", "keyMultiplyOperation" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "keyAddOperation":
+                        operation = O_PLUS
+                        d.type('+')
+                    if input_name.split()[0] == "keySubstractOperation":
+                        operation = O_MINUS
+                        d.type('-')
+                    if input_name.split()[0] == "keyDivideOperation":
+                        operation = O_DIV
+                        d.type('/')
+                    if input_name.split()[0] == "keyMultiplyOperation":
+                        operation = O_MULTI
+                        d.type('*')
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyEqualsOperation" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_RESULT)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                    d.type('=')
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateMalformed()
+                    validateSUT()
+                }
+            }
+
+            input "clickAddOperation", "clickSubstractOperation", "clickDivideOperation", "clickMultiplyOperation" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "clickAddOperation":
+                        operation = O_PLUS
+                        d.tapBitmap("btnPlu.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickSubstractOperation":
+                        operation = O_MINUS
+                        d.tapBitmap("btnMin.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickDivideOperation":
+                        operation = O_DIV
+                        d.tapBitmap("btnDiv.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickMultiplyOperation":
+                        operation = O_MULTI
+                        d.tapBitmap("btnMul.png", colorMatch=0.8)
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "clickEqualsOperation" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_RESULT)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                    d.tapBitmap("btnEqu.png", colorMatch=0.8)
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateMalformed()
+                    validateSUT()
+                }
+            }
+
+        } #tag "Operation"
+
+        #A number was put in previously
+        tag "Number" {
+            guard() { return T_NUMBER in state }
+            adapter() {
+                #validateExpression(expression)
+            }
+
+            # syötetään laskimeen jokin number
+            input "InputNumberNumber" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_NUMBER)
+                }
+                adapter() {
+                    number = generateInputNumber()
+                    expression = expression + str(number)
+                    d.type(str(number))
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyAddNumber", "keySubstractNumber", "keyDivideNumber", "keyMultiplyNumber" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "keyAddNumber":
+                        operation = O_PLUS
+                        d.type('+')
+                    if input_name.split()[0] == "keySubstractNumber":
+                        operation = O_MINUS
+                        d.type('-')
+                    if input_name.split()[0] == "keyDivideNumber":
+                        operation = O_DIV
+                        d.type('/')
+                    if input_name.split()[0] == "keyMultiplyNumber":
+                        operation = O_MULTI
+                        d.type('*')
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyEqualsNumber" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_RESULT)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                    d.type('=')
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                }
+            }
+
+            input "clickAddNumber", "clickSubstractNumber", "clickDivideNumber", "clickMultiplyNumber" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "clickAddNumber":
+                        operation = O_PLUS
+                        d.tapBitmap("btnPlu.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickSubstractNumber":
+                        operation = O_MINUS
+                        d.tapBitmap("btnMin.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickDivideNumber":
+                        operation = O_DIV
+                        d.tapBitmap("btnDiv.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickMultiplyNumber":
+                        operation = O_MULTI
+                        d.tapBitmap("btnMul.png", colorMatch=0.8)
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "clickEqualsNumber" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_RESULT)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                    d.tapBitmap("btnEqu.png", colorMatch=0.8)
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                }
+            }
+
+        } #tag "Number"
+
+        #A number was put in previously
+        #Equals-button was pressed previously
+        tag "Result" {
+            guard() { return T_RESULT in state }
+            adapter() {
+                validateExpression(str(result))
+            }
+
+            # syötetään laskimeen jokin number
+            input "InputNumberResult" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_NUMBER)
+                }
+                adapter() {
+                    number = generateInputNumber()
+                    expression = str(number) #expression is cleared on new number
+                    d.type(str(number))
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyAddResult", "keySubstractResult", "keyDivideResult", "keyMultiplyResult" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "keyAddResult":
+                        operation = O_PLUS
+                        d.type('+')
+                    if input_name.split()[0] == "keySubstractResult":
+                        operation = O_MINUS
+                        d.type('-')
+                    if input_name.split()[0] == "keyDivideResult":
+                        operation = O_DIV
+                        d.type('/')
+                    if input_name.split()[0] == "keyMultiplyResult":
+                        operation = O_MULTI
+                        d.type('*')
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "keyEqualsResult" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_NUMBER)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    d.type('=')
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                }
+            }
+
+            input "clickAddResult", "clickSubstractResult", "clickDivideResult", "clickMultiplyResult" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_OPERATION)
+                }
+                adapter() {
+                    if input_name.split()[0] == "clickAddResult":
+                        operation = O_PLUS
+                        d.tapBitmap("btnPlu.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickSubstractResult":
+                        operation = O_MINUS
+                        d.tapBitmap("btnMin.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickDivideResult":
+                        operation = O_DIV
+                        d.tapBitmap("btnDiv.png", colorMatch=0.8)
+                    if input_name.split()[0] == "clickMultiplyResult":
+                        operation = O_MULTI
+                        d.tapBitmap("btnMul.png", colorMatch=0.8)
+                    expression = expression + operation
+                    sleep(waitShort)
+                    #d.refreshScreenshot()
+                }
+            }
+
+            input "clickEqualsResult" {
+                guard() { return True }
+                body() {
+                    state.clear()
+                    state.add(T_OPEN)
+                    state.add(T_NUMBER)
+                }
+                adapter() {
+                    operation = None
+                    subResult = None
+                    if expression[-1:].isdigit() == False:
+                        expression = expression[:-1]
+                    number = result = eval(expression)
+                    #print('expression[-1:].isdigit()' + str(expression[-1:].isdigit()))
+                    #expression = str(number) #expression should remain untouched
+
+                    d.tapBitmap("btnEqu.png", colorMatch=0.8)
+                    sleep(waitShort)
+                    d.refreshScreenshot()
+                    validateExpression(expression)
+                }
+            }
+        } #tag "Result"
+
+    } #tag "Open"
+    
+} #aal "gcalctool"
