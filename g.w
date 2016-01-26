@@ -1,6 +1,9 @@
 ".*" = 2
-"i:Close" = 1
-"i:InputNumberCleared" = 20
-"i:InputNumberOperation" = 40
-"i:InputNumberNumber" = 1
-"i:InputNumberResult" = 20
+"i:close" = 1
+"i:keyClr" = 10
+"i:keyCE" = 1
+["Cleared"] "i:oper.*" = 0
+["Operation"] "i:oper.*" = 0
+["Cleared"] "i:numberInputKey" = 10
+["Number"] "i:numberInputKey" = 2
+["Operation"] "i:numberInputKey" = 10
